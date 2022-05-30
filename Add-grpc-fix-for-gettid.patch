@@ -1,100 +1,70 @@
-From e50d1fa554154b7e398ef7a0357f646e22cd51cf Mon Sep 17 00:00:00 2001
-From: Jianjun Liu <jianjun.liu@intel.com>
-Date: Thu, 29 Aug 2019 14:56:13 +0800
-Subject: [PATCH] Add grpc fix for gettid
-
-Add gettid fix on gettid conflict because of glibc
-
-Signed-off-by: Jianjun Liu <jianjun.liu@intel.com>
----
- third_party/Rename-gettid-functions.patch | 78 +++++++++++++++++++++++
- 1 files changed, 78 insertions(+)
- create mode 100644 third_party/Rename-gettid-functions.patch
-
-diff --git a/third_party/Rename-gettid-functions.patch b/third_party/Rename-gettid-functions.patch
-new file mode 100644
-index 00000000..90bd9115
---- /dev/null
-+++ b/third_party/Rename-gettid-functions.patch
-@@ -0,0 +1,78 @@
-+From d1d017390b799c59d6fdf7b8afa6136d218bdd61 Mon Sep 17 00:00:00 2001
-+From: Benjamin Peterson <benjamin@dropbox.com>
-+Date: Fri, 3 May 2019 08:11:00 -0700
-+Subject: [PATCH] Rename gettid() functions.
+diff --git a/tensorflow/core/distributed_runtime/base_rendezvous_mgr.cc b/tensorflow/core/distributed_runtime/base_rendezvous_mgr.cc
+index de6e4b4a7c5..3e5a4bf1888 100644
+--- a/tensorflow/core/distributed_runtime/base_rendezvous_mgr.cc
++++ b/tensorflow/core/distributed_runtime/base_rendezvous_mgr.cc
+@@ -102,6 +102,20 @@ Status BaseRendezvousMgr::RecvLocal(int64 step_id,
+ }
+ 
+ void BaseRendezvousMgr::Cleanup(int64 step_id) {
++  // Delay the cleanup by 1024 steps for ByteScheduler
++  int64 step_to_clean;
++  {
++    mutex_lock l(mu_);
++    if (steps_to_clean_.size() >= 1024) {
++      step_to_clean = steps_to_clean_.front();
++      steps_to_clean_.pop_front();
++      steps_to_clean_.push_back(step_id);
++    } else {
++      steps_to_clean_.push_back(step_id);
++    }
++  }
++  step_id = step_to_clean;
 +
-+glibc 2.30 will declare its own gettid; see https://sourceware.org/git/?p=glibc.git;a=commit;h=1d0fc213824eaa2a8f8c4385daaa698ee8fb7c92. Rename the grpc versions to avoid naming conflicts.
-+---
-+ src/core/lib/gpr/log_linux.cc          | 4 ++--
-+ src/core/lib/gpr/log_posix.cc          | 4 ++--
-+ src/core/lib/iomgr/ev_epollex_linux.cc | 4 ++--
-+ 3 files changed, 6 insertions(+), 6 deletions(-)
-+
-+diff --git a/src/core/lib/gpr/log_linux.cc b/src/core/lib/gpr/log_linux.cc
-+index 561276f0c20..8b597b4cf2f 100644
-+--- a/src/core/lib/gpr/log_linux.cc
-++++ b/src/core/lib/gpr/log_linux.cc
-+@@ -40,7 +40,7 @@
-+ #include <time.h>
-+ #include <unistd.h>
-+
-+-static long gettid(void) { return syscall(__NR_gettid); }
-++static long sys_gettid(void) { return syscall(__NR_gettid); }
-+
-+ void gpr_log(const char* file, int line, gpr_log_severity severity,
-+              const char* format, ...) {
-+@@ -70,7 +70,7 @@ void gpr_default_log(gpr_log_func_args* args) {
-+   gpr_timespec now = gpr_now(GPR_CLOCK_REALTIME);
-+   struct tm tm;
-+   static __thread long tid = 0;
-+-  if (tid == 0) tid = gettid();
-++  if (tid == 0) tid = sys_gettid();
-+
-+   timer = static_cast<time_t>(now.tv_sec);
-+   final_slash = strrchr(args->file, '/');
-+diff --git a/src/core/lib/gpr/log_posix.cc b/src/core/lib/gpr/log_posix.cc
-+index b6edc14ab6b..2f7c6ce3760 100644
-+--- a/src/core/lib/gpr/log_posix.cc
-++++ b/src/core/lib/gpr/log_posix.cc
-+@@ -31,7 +31,7 @@
-+ #include <string.h>
-+ #include <time.h>
-+
-+-static intptr_t gettid(void) { return (intptr_t)pthread_self(); }
-++static intptr_t sys_gettid(void) { return (intptr_t)pthread_self(); }
-+
-+ void gpr_log(const char* file, int line, gpr_log_severity severity,
-+              const char* format, ...) {
-+@@ -86,7 +86,7 @@ void gpr_default_log(gpr_log_func_args* args) {
-+   char* prefix;
-+   gpr_asprintf(&prefix, "%s%s.%09d %7" PRIdPTR " %s:%d]",
-+                gpr_log_severity_string(args->severity), time_buffer,
-+-               (int)(now.tv_nsec), gettid(), display_file, args->line);
-++               (int)(now.tv_nsec), sys_gettid(), display_file, args->line);
-+
-+   fprintf(stderr, "%-70s %s\n", prefix, args->message);
-+   gpr_free(prefix);
-+diff --git a/src/core/lib/iomgr/ev_epollex_linux.cc b/src/core/lib/iomgr/ev_epollex_linux.cc
-+index 08116b3ab53..76f59844312 100644
-+--- a/src/core/lib/iomgr/ev_epollex_linux.cc
-++++ b/src/core/lib/iomgr/ev_epollex_linux.cc
-+@@ -1102,7 +1102,7 @@ static void end_worker(grpc_pollset* pollset, grpc_pollset_worker* worker,
-+ }
-+
-+ #ifndef NDEBUG
-+-static long gettid(void) { return syscall(__NR_gettid); }
-++static long sys_gettid(void) { return syscall(__NR_gettid); }
-+ #endif
-+
-+ /* pollset->mu lock must be held by the caller before calling this.
-+@@ -1122,7 +1122,7 @@ static grpc_error* pollset_work(grpc_pollset* pollset,
-+ #define WORKER_PTR (&worker)
-+ #endif
-+ #ifndef NDEBUG
-+-  WORKER_PTR->originator = gettid();
-++  WORKER_PTR->originator = sys_gettid();
-+ #endif
-+   if (GRPC_TRACE_FLAG_ENABLED(grpc_polling_trace)) {
-+     gpr_log(GPR_INFO,
--- 
-2.22.0
-
+   Rendezvous* rendez = nullptr;
+   {
+     mutex_lock l(mu_);
+diff --git a/tensorflow/core/distributed_runtime/base_rendezvous_mgr.h b/tensorflow/core/distributed_runtime/base_rendezvous_mgr.h
+index c5a56f324ab..e0656a49fd7 100644
+--- a/tensorflow/core/distributed_runtime/base_rendezvous_mgr.h
++++ b/tensorflow/core/distributed_runtime/base_rendezvous_mgr.h
+@@ -16,6 +16,7 @@ limitations under the License.
+ #ifndef TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_BASE_RENDEZVOUS_MGR_H_
+ #define TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_BASE_RENDEZVOUS_MGR_H_
+ 
++#include <deque>
+ #include <string>
+ #include <unordered_set>
+ 
+@@ -102,6 +103,7 @@ class BaseRendezvousMgr : public RendezvousMgrInterface {
+   // Not owned.
+   const WorkerEnv* const worker_env_;
+ 
++  std::deque<int64> steps_to_clean_ GUARDED_BY(mu_);
+   mutex mu_;
+   Table table_ GUARDED_BY(mu_);
+ 
+diff --git a/tensorflow/workspace.bzl b/tensorflow/workspace.bzl
+index 527d2a175dc..a9ca4f351a6 100755
+--- a/tensorflow/workspace.bzl
++++ b/tensorflow/workspace.bzl
+@@ -462,6 +462,7 @@ def tf_workspace(path_prefix = "", tf_repo_name = ""):
+     # WARNING: make sure ncteisen@ and vpai@ are cc-ed on any CL to change the below rule
+     tf_http_archive(
+         name = "grpc",
++       patch_file = clean_dep("//third_party:Rename-gettid-functions.patch"),
+         sha256 = "1aa84387232dda273ea8fdfe722622084f72c16f7b84bfc519ac7759b71cdc91",
+         strip_prefix = "grpc-69b6c047bc767b4d80e7af4d00ccb7c45b683dae",
+         system_build_file = clean_dep("//third_party/systemlibs:grpc.BUILD"),
+diff --git a/third_party/icu/workspace.bzl b/third_party/icu/workspace.bzl
+index f100836b410..74ed39efe93 100644
+--- a/third_party/icu/workspace.bzl
++++ b/third_party/icu/workspace.bzl
+@@ -11,7 +11,7 @@ def repo():
+     third_party_http_archive(
+         name = "icu",
+         strip_prefix = "icu-release-62-1",
+-        sha256 = "e15ffd84606323cbad5515bf9ecdf8061cc3bf80fb883b9e6aa162e485aa9761",
++        sha256 = "86b85fbf1b251d7a658de86ce5a0c8f34151027cc60b01e1b76f167379acf181",
+         urls = [
+             "https://mirror.bazel.build/github.com/unicode-org/icu/archive/release-62-1.tar.gz",
+             "https://github.com/unicode-org/icu/archive/release-62-1.tar.gz",
